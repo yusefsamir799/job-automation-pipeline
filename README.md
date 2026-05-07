@@ -33,7 +33,7 @@ So I built this instead.
 ```
 Indeed ───────────────────────────────────────────────────────────────────┐
 LinkedIn ─────────────────────────────────────────────────────────────────┤
-Arbeitnow ────────────────────────────────────────────────────────────────┼──→ Filter ──→ DeepSeek Score ──→ Claude Cover Letters ──→ Google Sheets
+Arbeitnow ────────────────────────────────────────────────────────────────┼──→ Filter ──→ Claude Two-Tier Score ──→ Claude Cover Letters ──→ Google Sheets
 32 Company Career Pages (Greenhouse / Lever / Ashby / SmartRecruiters) ──┘
 ```
 
@@ -48,7 +48,7 @@ All 4 sources scrape in parallel. Results merge, get filtered, scored by AI, and
 | Scraping (job boards) | Python + [JobSpy](https://github.com/Bunsly/JobSpy) | Handles Indeed + LinkedIn without login |
 | Scraping (company pages) | Python + ATS public APIs | Free, fast, no browser needed, zero blocking risk |
 | Workflow automation | [n8n](https://n8n.io) | Open source, self-hosted, parallel execution |
-| Job scoring | [DeepSeek V3.2](https://api.deepseek.com) API | 7–18x cheaper than GPT-4 for structured tasks. Real cost: $0.04 per run of ~300 jobs |
+| Job scoring | [Claude Haiku 4.5 + Sonnet 4.6](https://anthropic.com) (two-tier) | Haiku cheaply scores every job; Sonnet re-ranks the top candidates for higher precision |
 | Cover letter generation | [Claude Sonnet 4.6 + Haiku 4.5](https://anthropic.com) via Batch API | Sonnet quality for top matches, Haiku for volume. 50% cost saving via Batch API |
 | Job tracking | Google Sheets API | Accessible anywhere, easy to update manually |
 | Output format | `.docx` (cover letters), `.csv` (intermediate data) | ATS-compatible for cover letters |
@@ -78,14 +78,18 @@ Instead of scraping company career pages with a browser (slow, fragile, gets blo
 
 All APIs are free, public, and require no authentication. One new company takes 2 minutes to add (just fill one row in the Google Sheet).
 
-### AI Scoring — Two Layers
-Every job gets scored 0–100 against your CV, with two layers of logic:
+### AI Scoring — Two-Tier, Two-Layer
+Every job gets scored 0–100 against your CV, using two passes of Claude with two layers of logic:
 
-**Layer 1 — LLM judgment (DeepSeek V3.2):** Weighted scoring across role level fit (30%), skills match (25%), experience relevance (20%), language (15%), location (10%).
+**Pass 1 — Haiku 4.5 first sweep:** Cheap, fast model scores every job in the queue. Most jobs get a final score here.
+
+**Pass 2 — Sonnet 4.6 re-ranking:** Any job Haiku scores ≥60 is re-scored with Sonnet 4.6 for higher-precision rankings on the candidates that actually matter. Sonnet's score replaces Haiku's in the output.
+
+Both passes share the same scoring rubric: role level fit (30%), skills match (25%), experience relevance (20%), language (15%), location (10%). The system prompt (your CV + scoring rules) is identical for every request, so prompt caching kicks in after the first call and cuts input cost by ~90% for the rest of the run.
 
 **Layer 2 — Python hard overrides:** Certain rules can't be trusted to an LLM alone. If a job description is in German, the score is forced to 0 in Python — regardless of what the LLM outputs. Same for wrong-field roles (nursing, accounting, etc.) and 10+ years experience requirements. This two-layer approach ensures the scoring is reliable, not just plausible.
 
-Output: `apply` (70+), `maybe` (50–69), `skip` (<50) — plus a `gaps` field listing the 1–2 key reasons you might not get the role. That gaps field goes straight into column K of the Google Sheet.
+Output: `apply` (70+), `maybe` (50–69), `skip` (<50) — plus a `gaps` field listing the 1–2 key reasons you might not get the role, and a `scored_by` field marking whether the row was finalized by Haiku or Sonnet. The gaps field goes straight into column K of the Google Sheet.
 
 ### Intelligent Cover Letter Generation
 Cover letters are generated using two Claude models, tiered by job score:
@@ -116,12 +120,12 @@ This is a production system with real cost data:
 
 | Item | Actual Cost |
 |---|---|
-| DeepSeek scoring (300 jobs/run) | $0.04 per run |
+| Claude scoring (~300 jobs/run, ~30% re-scored with Sonnet) | ~$1.00–1.20 per run |
 | Claude cover letters (40/day) | ~$0.26/day |
 | Everything else (n8n, JobSpy, Sheets API, Arbeitnow) | Free |
-| **Total monthly** | **~$8–9/month** |
+| **Total monthly** | **~$35–40/month** |
 
-The DeepSeek cost is low because of prompt caching: the CV and scoring rules are sent as the system prompt (identical every request and cached), while the job description is the user message (different every request). Cache hit rate confirmed at 80%+.
+Scoring cost stays bounded because of prompt caching: the CV and scoring rules are sent as the system prompt (identical every request and cached), while the job description is the user message (different every request). After the first call in a run, the cached prefix costs ~10% of normal input pricing.
 
 ---
 
@@ -130,7 +134,7 @@ The DeepSeek cost is low because of prompt caching: the CV and scoring rules are
 1. **Trigger** — You click "Execute workflow" in n8n. Takes 5 seconds.
 2. **Scrape** — All 4 scrapers run in parallel (~30–40 minutes, mostly LinkedIn delays)
 3. **Filter** — Merges all sources, deduplicates, removes irrelevant titles and German-language jobs
-4. **Score** — DeepSeek scores every remaining job against your CV (~5–15 minutes)
+4. **Score** — Claude two-tier scores every remaining job against your CV: Haiku for the full sweep, Sonnet re-scores anything ≥60 (~10–20 minutes)
 5. **Cover Letters** — Top 40 jobs submitted to Claude Batch API (completes in background overnight)
 6. **Sheets Upload** — Everything synced to Google Sheets
 7. **Morning** — Run `cover_letter_retriever.py` to download letters, re-sync sheet, start applying
@@ -144,8 +148,7 @@ The pipeline is fire-and-forget. You trigger it once in the evening, walk away, 
 ### Prerequisites
 - Python 3.12
 - Node.js (for n8n)
-- A [DeepSeek API account](https://platform.deepseek.com) (free 5M tokens on signup)
-- An [Anthropic API account](https://console.anthropic.com) ($5 free credits on signup)
+- An [Anthropic API account](https://console.anthropic.com) — used for both scoring and cover letters ($5 free credits on signup)
 - A Google Cloud project with Sheets API + Drive API enabled (free)
 
 ### 1. Clone the repo
@@ -158,7 +161,7 @@ cd job-automation-pipeline
 ### 2. Install Python dependencies
 
 ```bash
-pip install python-jobspy openai anthropic python-docx gspread requests beautifulsoup4
+pip install python-jobspy anthropic python-docx gspread google-auth requests beautifulsoup4 pandas
 ```
 
 ### 3. Set environment variables
@@ -172,14 +175,12 @@ cp .env.example .env
 ```
 GOOGLE_SPREADSHEET_ID=your_spreadsheet_id_here
 GOOGLE_CREDENTIALS_PATH=path/to/your/google_credentials.json
-DEEPSEEK_API_KEY=sk-your-deepseek-key-here
 ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here
 BASE_PATH=path/to/your/working/directory
 ```
 
 On Windows, set these as system environment variables instead:
 ```cmd
-setx DEEPSEEK_API_KEY "sk-your-key-here"
 setx ANTHROPIC_API_KEY "sk-ant-your-key-here"
 setx GOOGLE_SPREADSHEET_ID "your-spreadsheet-id"
 setx GOOGLE_CREDENTIALS_PATH "C:\path\to\google_credentials.json"
@@ -274,7 +275,7 @@ job-automation-pipeline/
 │
 ├── pipeline/
 │   ├── job_filter.py                  ← merge, deduplicate, filter all sources
-│   ├── job_scorer.py                  ← DeepSeek V3.2 scoring + Python overrides
+│   ├── job_scorer.py                  ← Two-tier Claude scoring (Haiku 4.5 + Sonnet 4.6) + Python overrides
 │   ├── cover_letter_generator.py      ← Claude Batch API submission
 │   ├── cover_letter_retriever.py      ← download completed cover letters
 │   └── sheets_upload.py               ← Google Sheets sync
@@ -297,14 +298,14 @@ job-automation-pipeline/
 
 | Item | Cost | Notes |
 |---|---|---|
-| DeepSeek V3.2 scoring | ~$0.50–1.00/month | $0.04/run confirmed. 80%+ cache hit rate on system prompt. |
+| Claude scoring (Haiku 4.5 + Sonnet 4.6) | ~$30/month | ~$1/run × 30 runs/month. Prompt caching keeps system-prompt cost ~10% of headline. |
 | Claude cover letters | ~$7.80/month | 40 letters/day, Sonnet + Haiku mix, Batch API (50% discount) |
 | n8n | Free | Self-hosted, open source |
 | JobSpy (Indeed + LinkedIn) | Free | Open source Python library |
 | Arbeitnow API | Free | Public API, no auth required |
 | Company ATS APIs | Free | All 4 ATS platforms have public job listing APIs |
 | Google Sheets API | Free | Within free quota |
-| **Total** | **~$8–9/month** | For ~30–35 applications/day |
+| **Total** | **~$38/month** | For ~30–35 applications/day |
 
 ---
 

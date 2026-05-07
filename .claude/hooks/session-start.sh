@@ -16,7 +16,6 @@ PIP_FLAGS="--disable-pip-version-check --no-input"
 # Runtime dependencies (matches README + actual imports across scrapers/, pipeline/, setup/).
 python3 -m pip install $PIP_FLAGS \
   python-jobspy \
-  openai \
   anthropic \
   python-docx \
   gspread \
