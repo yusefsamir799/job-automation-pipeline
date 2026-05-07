@@ -77,7 +77,7 @@ def main():
         "url",              # D: Job posting URL
         "source",           # E: Indeed / LinkedIn / Arbeitnow / [Company] Careers
         "scope",            # F: GenAI / BI / CoS / Consulting
-        "score",            # G: DeepSeek score (0-100)
+        "score",            # G: Claude score (0-100)
         "label",            # H: apply / maybe / skip
         "model",            # I: Sonnet / Haiku (cover letter model)
         "cover_letter",     # J: Cover letter filename
